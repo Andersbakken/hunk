@@ -12,9 +12,17 @@ static void usage(FILE *f)
             "  --match-raw|-r        Don't treat patterns as regexps\n"
             "  --match-context|-c    Apply matches to context lines\n"
             "  --match-headers|-H    Apply matches to header lines\n"
+            "  --verbose|-v          Be verbose\n"
             "  --in|-i [match]       Keep hunks that match this pattern\n"
             "  --out|-o|-d [match]   Filter out hunks match this pattern\n");
 }
+
+enum Flag {
+    MatchContext = 0x1,
+    MatchHeaders = 0x2,
+    Raw = 0x4,
+    Verbose = 0x8
+};
 
 class Match
 {
@@ -32,6 +40,7 @@ public:
     {}
 
     virtual bool match(const char *line) const = 0;
+    virtual std::string toString() const = 0;
 
     const Type type;
 };
@@ -48,6 +57,13 @@ public:
         return strstr(mPattern, line);
     }
 
+    virtual std::string toString() const
+    {
+        char buf[1024];
+        snprintf(buf, sizeof(buf), "--%s=%s", type == In ? "in" : "out", mPattern);
+        return buf;
+    }
+
     char *mPattern;
 };
 
@@ -55,7 +71,7 @@ class RegexpMatch : public Match
 {
 public:
     RegexpMatch(Type type, char *pattern)
-        : Match(type)
+        : Match(type), mPattern(pattern)
     {
         if (regcomp(&mRegex, pattern, 0)) {
             fprintf(stderr, "Invalid regexp %s\n", pattern);
@@ -72,42 +88,60 @@ public:
     {
         return !regexec(&mRegex, line, 0, 0, 0);
     }
+
+    virtual std::string toString() const
+    {
+        char buf[1024];
+        snprintf(buf, sizeof(buf), "--%s=%s", type == In ? "in" : "out", mPattern);
+        return buf;
+    }
+    
     regex_t mRegex;
+    char *mPattern;
 };
 
-static inline void processHunk(const std::vector<std::pair<std::string, bool> > &lines, const std::vector<Match*> &matches)
+static inline void processHunk(const std::vector<std::pair<std::string, bool> > &lines,
+                               const std::vector<Match*> &matches,
+                               unsigned int flags)
 {
     size_t match = matches.size();
-    bool hasOuts = false;
+    bool hasIns = false;
+    if (flags & Verbose) {
+        fprintf(stderr, "Parsing hunk\n");
+        for (std::vector<std::pair<std::string, bool> >::const_iterator it = lines.begin(); it != lines.end(); ++it) {
+            fprintf(stderr, "%s %s", it->second ? "t" : "nil", it->first.c_str());
+        }
+    }
     for (std::vector<std::pair<std::string, bool> >::const_iterator it = lines.begin(); it != lines.end(); ++it) {
         if (it->second) {
-            // printf("Considering %s", it->first.c_str());
             for (size_t m=0; m<match; ++m) {
-                if (matches.at(m)->type == Match::Out)
-                    hasOuts = true;
+                if (matches.at(m)->type == Match::In)
+                    hasIns = true;
                 if (matches.at(m)->match(it->first.c_str())) {
+                    if (flags & Verbose)
+                        fprintf(stderr, "Matched %s %s", matches.at(m)->toString().c_str(), it->first.c_str());
                     match = m;
                     break;
                 }
             }
-        // } else {
-        //     printf("Not considering %s", it->first.c_str());
         }
     }
-    if (!hasOuts && match == matches.size()) {
+    if (hasIns && match == matches.size()) {
+        if (flags & Verbose)
+            fprintf(stderr, "Hunk was discarded because of no matches\n");
         return;
     } else if (match < matches.size() && matches.at(match)->type == Match::Out) {
+        if (flags & Verbose)
+            fprintf(stderr, "Hunk was discarded because of match %zu\n", match);
         return;
     }
+    if (flags & Verbose)
+        fprintf(stderr, "Hunk matched. printing %zu lines\n", lines.size());
+
     for (std::vector<std::pair<std::string, bool> >::const_iterator it = lines.begin(); it != lines.end(); ++it) {
         fwrite(it->first.c_str(), it->first.size(), 1, stdout);
     }
 }
-enum Flag {
-    MatchContext = 0x1,
-    MatchHeaders = 0x2,
-    Raw = 0x4
-};
 
 static void processFile(FILE *f, const std::vector<Match*> &matches, unsigned int flags)
 {
@@ -118,7 +152,7 @@ static void processFile(FILE *f, const std::vector<Match*> &matches, unsigned in
     while (fgets(buf, sizeof(buf), f)) {
         if (!strncmp("--- ", buf, 4) || isdigit(buf[0])) {
             if (seenHunkStart) {
-                processHunk(pending, matches);
+                processHunk(pending, matches, flags);
                 pending.clear();
             }
             seenHunkStart = true;
@@ -136,7 +170,7 @@ static void processFile(FILE *f, const std::vector<Match*> &matches, unsigned in
                 break;
             default:
                 if (seenHunkStart) {
-                    processHunk(pending, matches);
+                    processHunk(pending, matches, flags);
                     pending.clear();
                     seenHunkStart = false;
                 }
@@ -148,7 +182,7 @@ static void processFile(FILE *f, const std::vector<Match*> &matches, unsigned in
             pending.push_back(std::make_pair(buf, flags & MatchHeaders));
         }
     }
-    processHunk(pending, matches);
+    processHunk(pending, matches, flags);
 }
 
 int main(int argc, char **argv)
@@ -160,20 +194,24 @@ int main(int argc, char **argv)
         { "match-headers", no_argument, 0, 'H' },
         { "in", required_argument, 0, 'i' },
         { "out", required_argument, 0, 'o' },
+        { "verbose", no_argument, 0, 'v' },
         { 0, 0, 0, 0 }
     };
     unsigned int flags = 0;
     std::vector<std::pair<char*, bool> > input;
     std::vector<Match*> matches;
     while (true) {
-        const int c = getopt_long(argc, argv, "hri:o:d:cH", opts, 0);
-        if (c == -1) {
+        const int c = getopt_long(argc, argv, "hri:o:d:cHv", opts, 0);
+        if (c == -1)
             break;
-        }
+
         switch (c) {
         case 'h':
             usage(stdout);
             return 0;
+        case 'v':
+            flags |= Verbose;
+            break;
         case 'r':
             flags |= Raw;
             break;
