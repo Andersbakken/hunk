@@ -3,3 +3,7 @@
 /Makefile
 /cmake_install.cmake
 /hunk
+/.ninja_deps
+/.ninja_log
+/build.ninja
+/rules.ninja
