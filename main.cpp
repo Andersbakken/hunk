@@ -3,6 +3,9 @@
 #include <vector>
 #include <assert.h>
 #include <regex.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
 
 static void usage(FILE *f)
 {
@@ -95,7 +98,7 @@ public:
         snprintf(buf, sizeof(buf), "--%s=%s", type == In ? "in" : "out", mPattern);
         return buf;
     }
-    
+
     regex_t mRegex;
     char *mPattern;
 };
@@ -104,6 +107,7 @@ static inline void processHunk(const std::vector<std::pair<std::string, bool> > 
                                const std::vector<Match*> &matches,
                                unsigned int flags)
 {
+    std::vector<bool> matched;
     size_t match = matches.size();
     bool hasIns = false;
     if (flags & Verbose) {
